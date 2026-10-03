@@ -227,7 +227,12 @@ function escapeHtml(s) {
 function makeCheckboxes() {
   lineList.innerHTML = "";
 
-  for (const [name, wave] of Object.entries({...defaultLines, ...customLines})) {
+  // Sort all emission lines by increasing wavelength.
+  // This puts the shortest wavelength at the top of the selection list.
+  const allLines = Object.entries({...defaultLines, ...customLines})
+    .sort((a, b) => a[1] - b[1]);
+
+  for (const [name, wave] of allLines) {
     const label = document.createElement("label");
     label.className = "check";
 
@@ -344,11 +349,16 @@ function parseWindows() {
 }
 
 function selectedLines() {
-  const all = {...defaultLines, ...customLines};
+  const selected = [];
+  lineList.querySelectorAll('input[type="checkbox"]:checked').forEach(cb => {
+    const name = cb.dataset.name;
+    const wave = Object.prototype.hasOwnProperty.call(defaultLines, name)
+      ? defaultLines[name]
+      : customLines[name];
+    selected.push([name, wave]);
+  });
 
-  return Array.from(lineList.querySelectorAll("input:checked"))
-    .map(box => [box.dataset.name, all[box.dataset.name]])
-    .filter(x => Number.isFinite(Number(x[1])));
+  return selected.sort((a, b) => b[1] - a[1]);
 }
 
 function getIntervals(restAngstrom, windows) {
