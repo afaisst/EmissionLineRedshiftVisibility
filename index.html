@@ -53,6 +53,21 @@
   .line-list { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 12px; }
   .check { display: flex; align-items: center; gap: 7px; }
   .check input { width: auto; }
+  .line-remove {
+    width: 19px;
+    height: 19px;
+    min-width: 19px;
+    padding: 0;
+    border-radius: 50%;
+    background: #eef1f7;
+    color: #667085;
+    border: 1px solid #d9dde5;
+    font-size: 13px;
+    line-height: 16px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .line-remove:hover { background: #f3dede; color: #b42318; }
   .custom-row { display: grid; grid-template-columns: 1fr 95px auto; gap: 7px; }
   button {
     border: 0; border-radius: 7px; padding: 9px 12px; cursor: pointer;
@@ -90,6 +105,40 @@
     .custom-row button { grid-column: 1 / -1; }
     .window-row { grid-template-columns: 1fr 1fr 34px; }
   }
+
+    .combined-wrap {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border: 1px solid #c9b7e8;
+      border-radius: 8px;
+      background: #faf7ff;
+    }
+    .combined-wrap h3 {
+      margin: 0 0 8px 0;
+      font-size: 15px;
+      color: #6f42c1;
+    }
+    .combined-wrap .none {
+      color: #666;
+      font-style: italic;
+    }
+    .combined-list {
+      margin: 0;
+      padding-left: 22px;
+    }
+
+
+    #copyCombinedBtn {
+      background: #faf7ff !important;
+      color: #6f42c1 !important;
+      border-color: #c9b7e8 !important;
+    }
+    #copyCombinedBtn:hover {
+      background: #f1e8ff !important;
+      color: #5b32a3 !important;
+      border-color: #6f42c1 !important;
+    }
+
 </style>
 </head>
 <body>
@@ -127,6 +176,8 @@
       <button id="resetZoom" class="secondary" style="margin-bottom:10px;">Reset zoom</button>
       <div id="plotWrap"><canvas id="plot"></canvas></div>
       <div id="tooltip"></div>
+      <div id="combinedWrap" class="combined-wrap"></div>
+      <button id="copyCombinedBtn" class="secondary" style="margin-top:12px;">Copy combined windows as Python dictionary</button>
       <div id="tableWrap"></div>
       <button id="copyPython" class="secondary" style="margin-top:12px;">Copy as Python dictionary</button>
       <div id="copyStatus" style="color:#667085;font-size:12px;margin-top:6px;min-height:17px;"></div>
@@ -163,6 +214,7 @@ const tooltip = document.getElementById("tooltip");
 let customLines = {};
 let plotState = null;
 let currentData = [];
+let currentCombined = [];
 let zoomRange = null; // [zmin, zmax] after clicking a bar
 
 
@@ -189,24 +241,43 @@ function makeCheckboxes() {
 
     label.appendChild(checkbox);
     label.appendChild(span);
+
+    // Only custom/user-added lines get a remove button.
+    if (Object.prototype.hasOwnProperty.call(customLines, name)) {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "line-remove";
+      remove.title = `Remove ${name}`;
+      remove.textContent = "×";
+
+      remove.onclick = function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        delete customLines[name];
+        makeCheckboxes();
+        update();
+      };
+
+      label.appendChild(remove);
+    }
+
     lineList.appendChild(label);
   }
 }
-
 function addWindow(lower = "", upper = "") {
   const row = document.createElement("div");
   row.className = "window-row";
 
   const lowerInput = document.createElement("input");
   lowerInput.type = "number";
-  lowerInput.step = "any";
+  lowerInput.step = "0.05";
   lowerInput.min = "0";
   lowerInput.placeholder = "Lower μm";
   lowerInput.value = lower;
 
   const upperInput = document.createElement("input");
   upperInput.type = "number";
-  upperInput.step = "any";
+  upperInput.step = "0.05";
   upperInput.min = "0";
   upperInput.placeholder = "Upper μm";
   upperInput.value = upper;
@@ -289,6 +360,46 @@ function getIntervals(restAngstrom, windows) {
     .map(x => [Math.max(0, x[0]), x[1]]);
 }
 
+
+function intersectIntervals(intervalLists) {
+  if (!intervalLists.length) return [];
+
+  let result = intervalLists[0].map(iv => [iv[0], iv[1]]);
+
+  for (let i = 1; i < intervalLists.length; i++) {
+    const next = [];
+    for (const a of result) {
+      for (const b of intervalLists[i]) {
+        const lo = Math.max(a[0], b[0]);
+        const hi = Math.min(a[1], b[1]);
+        if (hi >= lo) next.push([lo, hi]);
+      }
+    }
+    result = next;
+    if (!result.length) break;
+  }
+
+  result.sort((a, b) => a[0] - b[0]);
+
+  const merged = [];
+  for (const iv of result) {
+    if (!merged.length || iv[0] > merged[merged.length - 1][1]) {
+      merged.push([iv[0], iv[1]]);
+    } else {
+      merged[merged.length - 1][1] = Math.max(
+        merged[merged.length - 1][1],
+        iv[1]
+      );
+    }
+  }
+  return merged;
+}
+
+function getCombinedIntervals(data) {
+  if (!data.length) return [];
+  return intersectIntervals(data.map(d => d.intervals));
+}
+
 function niceStep(range) {
   const rough = range / 8;
   const p = Math.pow(10, Math.floor(Math.log10(rough)));
@@ -303,7 +414,7 @@ function formatNum(x) {
   return x.toFixed(3);
 }
 
-function drawPlot(data) {
+function drawPlot(data, combined = []) {
   const dpr = window.devicePixelRatio || 1;
   const cssW = Math.max(650, canvas.parentElement.clientWidth);
   const cssH = Math.max(400, 110 + data.length * 52);
@@ -316,7 +427,7 @@ function drawPlot(data) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssW, cssH);
 
-  const left = 82, right = 25, top = 38, bottom = 60;
+  const left = 82, right = 25, top = 38, bottom = 78;
   const pw = cssW - left - right;
   const ph = cssH - top - bottom;
 
@@ -336,7 +447,7 @@ function drawPlot(data) {
   const sx = z => left + (z - zmin) / (zmax - zmin) * pw;
   const rowH = ph / Math.max(data.length, 1);
 
-  plotState = { bars: [], data, zmin, zmax, fullZmax };
+  plotState = { bars: [], data, zmin, zmax, fullZmax, combinedBars: [] };
 
   ctx.font = "12px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
   ctx.textBaseline = "middle";
@@ -411,6 +522,54 @@ function drawPlot(data) {
     });
   });
 
+  // Combined visibility band: redshift ranges where ALL selected lines are visible.
+  if (combined.length) {
+    const combinedH = 12;
+    const combinedY = top + ph - combinedH - 4;
+
+    ctx.fillStyle = "#7b4ab5";
+    ctx.strokeStyle = "#6f42c1";
+    ctx.lineWidth = 1;
+
+    for (const iv of combined) {
+      const visibleMin = Math.max(iv[0], zmin);
+      const visibleMax = Math.min(iv[1], zmax);
+      if (visibleMax <= visibleMin) continue;
+
+      const x1 = sx(visibleMin);
+      const x2 = sx(visibleMax);
+      ctx.fillRect(x1, combinedY, Math.max(1, x2 - x1), combinedH);
+      ctx.strokeRect(x1, combinedY, Math.max(1, x2 - x1), combinedH);
+
+      plotState.combinedBars.push({
+        x1, x2,
+        y1: combinedY,
+        y2: combinedY + combinedH,
+        name: "ALL",
+        zmin: iv[0],
+        zmax: iv[1]
+      });
+
+      // Same behavior as the blue bars: show the range after zooming.
+      if (zoomRange && x2 - x1 > 45) {
+        ctx.fillStyle = "#fff";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(
+          `${formatNum(iv[0])}–${formatNum(iv[1])}`,
+          (x1 + x2) / 2,
+          combinedY + combinedH / 2
+        );
+      }
+    }
+
+    ctx.fillStyle = "#6f42c1";
+    ctx.font = "bold 11px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillText("ALL", left - 12, combinedY + combinedH / 2);
+  }
+
   ctx.fillStyle = "#20242c";
   ctx.textAlign = "center";
   ctx.font = "13px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
@@ -421,6 +580,35 @@ function drawPlot(data) {
   ctx.rotate(-Math.PI / 2);
   ctx.fillText("Emission line", 0, 0);
   ctx.restore();
+}
+
+
+function renderCombined(combined) {
+  const wrap = document.getElementById("combinedWrap");
+
+  let html = "<h3>Redshift ranges where all selected lines are visible</h3>";
+
+  if (!combined.length) {
+    html += '<div class="none">No redshift range exists where all selected lines are simultaneously visible.</div>';
+  } else {
+    html += '<ul class="combined-list">';
+    for (const iv of combined) {
+      html += `<li>${formatNum(iv[0])} ≤ z ≤ ${formatNum(iv[1])}</li>`;
+    }
+    html += "</ul>";
+  }
+
+  wrap.innerHTML = html;
+}
+
+function makeCombinedPythonDictionary(combined) {
+  const ranges = combined
+    .map(iv => `        [${iv[0]}, ${iv[1]}]`)
+    .join(",\n");
+
+  return "{\n    \"all_selected_lines\": [" +
+    (ranges ? "\n" + ranges + "\n    " : "") +
+    "]\n}";
 }
 
 function renderTable(data) {
@@ -472,7 +660,9 @@ function update() {
     }));
 
     currentData = data;
-    drawPlot(data);
+    currentCombined = getCombinedIntervals(data);
+    drawPlot(data, currentCombined);
+    renderCombined(currentCombined);
     renderTable(data);
   } catch (e) {
     statusEl.textContent = e.message;
@@ -516,6 +706,27 @@ document.getElementById("addLine").onclick = function() {
   waveInput.value = "";
 };
 
+
+document.getElementById("copyCombinedBtn").onclick = async function() {
+  const text = makeCombinedPythonDictionary(currentCombined);
+
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (err) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+
+  const btn = document.getElementById("copyCombinedBtn");
+  const oldText = btn.textContent;
+  btn.textContent = "Copied!";
+  setTimeout(() => btn.textContent = oldText, 1200);
+};
+
 document.getElementById("resetBtn").onclick = function() {
   zoomRange = null;
   windowList.innerHTML = "";
@@ -543,10 +754,15 @@ canvas.addEventListener("click", function(event) {
   const x = (event.clientX - rect.left) * scaleX / (window.devicePixelRatio || 1);
   const y = (event.clientY - rect.top) * scaleY / (window.devicePixelRatio || 1);
 
-  const hit = plotState.bars.find(b =>
-    x >= b.x1 && x <= b.x2 &&
-    y >= b.y1 && y <= b.y2
-  );
+  const hit =
+    plotState.bars.find(b =>
+      x >= b.x1 && x <= b.x2 &&
+      y >= b.y1 && y <= b.y2
+    ) ||
+    plotState.combinedBars.find(b =>
+      x >= b.x1 && x <= b.x2 &&
+      y >= b.y1 && y <= b.y2
+    );
 
   // If already zoomed, any click on the plot resets to the default view.
   if (zoomRange) {
@@ -581,10 +797,15 @@ canvas.addEventListener("mousemove", function(event) {
   const x = (event.clientX - rect.left) * scaleX / (window.devicePixelRatio || 1);
   const y = (event.clientY - rect.top) * scaleY / (window.devicePixelRatio || 1);
 
-  const hit = plotState.bars.find(b =>
-    x >= b.x1 && x <= b.x2 &&
-    y >= b.y1 && y <= b.y2
-  );
+  const hit =
+    plotState.bars.find(b =>
+      x >= b.x1 && x <= b.x2 &&
+      y >= b.y1 && y <= b.y2
+    ) ||
+    plotState.combinedBars.find(b =>
+      x >= b.x1 && x <= b.x2 &&
+      y >= b.y1 && y <= b.y2
+    );
 
   if (!hit) {
     tooltip.style.display = "none";
